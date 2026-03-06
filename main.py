@@ -124,7 +124,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
         return []
 
     def _calc_next_message_seq(self, batch: list[dict[str, Any]], current: int | None) -> int | None:
-        # 取当前批次最小 message_seq 再减一，向更早消息翻页
+        # 取当前批次最小 message_seq 作为下一次翻页锚点，避免跳到不存在的序号
         seq_values: list[int] = []
         for item in batch:
             seq = item.get("message_seq")
@@ -138,12 +138,19 @@ class QQGroupMsgInfoGatheringPlugin(Star):
         if not seq_values:
             return None
 
-        next_seq = min(seq_values) - 1
-        if next_seq < 0:
-            return None
+        next_seq = min(seq_values)
         if current is not None and next_seq >= current:
+            next_seq = current - 1
+        if next_seq <= 0:
             return None
         return next_seq
+
+    def _is_message_not_exists_error(self, error: Exception) -> bool:
+        # Napcat/OneBot 在分页越界时可能返回 retcode=1200 且提示消息不存在
+        retcode = getattr(error, "retcode", None)
+        message_text = str(getattr(error, "message", "")) + str(getattr(error, "wording", ""))
+        raw_text = str(error)
+        return retcode == 1200 or ("不存在" in message_text) or ("不存在" in raw_text)
 
     async def _fetch_day_group_messages(
         self,
@@ -156,6 +163,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
         raw_messages: list[dict[str, Any]] = []
         seen_raw_ids: set[str] = set()
         message_seq: int | None = None
+        missing_seq_retry_count = 0
         group_id_for_api: Any = int(group_id) if group_id.isdigit() else group_id
 
         while True:
@@ -163,7 +171,21 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             if message_seq is not None:
                 params["message_seq"] = message_seq
 
-            response = await self._call_onebot_action(client, "get_group_msg_history", params)
+            try:
+                response = await self._call_onebot_action(client, "get_group_msg_history", params)
+            except Exception as e:
+                if self._is_message_not_exists_error(e):
+                    if message_seq is None or message_seq <= 1:
+                        logger.info(f"分页到历史边界，停止继续拉取: {e}")
+                        break
+                    missing_seq_retry_count += 1
+                    if missing_seq_retry_count > 100:
+                        logger.info(f"连续命中不存在的 message_seq，停止继续拉取: {e}")
+                        break
+                    message_seq -= 1
+                    continue
+                raise
+            missing_seq_retry_count = 0
             batch = self._extract_message_batch(response)
             if not batch:
                 break
@@ -220,17 +242,16 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             return
 
         client = event.bot
-        # 将 days 转换为“目标自然日”的闭开区间 [00:00:00, 次日00:00:00)
+        # 将 days 转换为“当前时刻回溯 x 天”的闭开区间 [now-x天, now]
         now = datetime.datetime.now()
-        target_date = now - datetime.timedelta(days=days)
-        start_datetime = datetime.datetime(target_date.year, target_date.month, target_date.day)
-        end_datetime = start_datetime + datetime.timedelta(days=1)
+        end_datetime = now
+        start_datetime = now - datetime.timedelta(days=days)
         start_timestamp = int(start_datetime.timestamp())
         end_timestamp = int(end_datetime.timestamp())
 
         await event.send(
             event.plain_result(
-                f"⏳ 正在拉取群 {groupID} 在 {target_date.strftime('%Y-%m-%d')} 的消息，请稍候..."
+                f"⏳ 正在拉取群 {groupID} 从 {start_datetime.strftime('%Y-%m-%d %H:%M:%S')} 到 {end_datetime.strftime('%Y-%m-%d %H:%M:%S')} 的消息，请稍候..."
             )
         )
 
