@@ -65,8 +65,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             candidates.extend(
                 [
                     lambda: call_action(action, **params),
-                    lambda: call_action(action=action, params=params),
-                    lambda: call_action(action, params),
+                    lambda: call_action(action=action, **params),
                 ]
             )
 
@@ -75,8 +74,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             candidates.extend(
                 [
                     lambda: call_api(action, **params),
-                    lambda: call_api(action=action, params=params),
-                    lambda: call_api(action, params),
+                    lambda: call_api(action=action, **params),
                 ]
             )
 
@@ -85,7 +83,6 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             candidates.extend(
                 [
                     lambda: direct_action(**params),
-                    lambda: direct_action(params),
                 ]
             )
 
