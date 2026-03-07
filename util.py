@@ -1,11 +1,13 @@
 import asyncio
 import datetime
 import json
+import re
 from pathlib import Path
 from typing import Any
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 from .models.OneBotV11Message import OneBotV11Message
+from .models.windowProcessOutputJson import windowProcessOutputJson
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -113,6 +115,50 @@ def _is_message_not_exists_error(error: Exception) -> bool:
     message_text = str(getattr(error, "message", "")) + str(getattr(error, "wording", ""))
     raw_text = str(error)
     return retcode == 1200 or ("不存在" in message_text) or ("不存在" in raw_text)
+
+
+def _extract_llm_json_text(raw_text: str) -> str:
+    text = raw_text.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    if fenced_match:
+        return fenced_match.group(1).strip()
+    return text
+
+
+def _parse_window_process_items(raw_text: str) -> list[windowProcessOutputJson]:
+    json_text = _extract_llm_json_text(raw_text)
+    parsed_payload: dict[str, Any] | None = None
+    try:
+        parsed_candidate = json.loads(json_text)
+        if isinstance(parsed_candidate, dict):
+            parsed_payload = parsed_candidate
+    except Exception:
+        start_index = json_text.find("{")
+        end_index = json_text.rfind("}")
+        if start_index >= 0 and end_index > start_index:
+            try:
+                parsed_candidate = json.loads(json_text[start_index : end_index + 1])
+                if isinstance(parsed_candidate, dict):
+                    parsed_payload = parsed_candidate
+            except Exception:
+                parsed_payload = None
+    if not parsed_payload:
+        return []
+
+    extracted_items = parsed_payload.get("extracted_items")
+    if not isinstance(extracted_items, list):
+        extracted_items = parsed_payload.get("extracted_info")
+    if not isinstance(extracted_items, list):
+        return []
+
+    output_items: list[windowProcessOutputJson] = []
+    for item in extracted_items:
+        if not isinstance(item, dict):
+            continue
+        output_items.append(windowProcessOutputJson.from_dict(item))
+    return output_items
 
 
 async def _fetch_messages_in_range(
@@ -240,7 +286,7 @@ async def process_msg(
     context: Context,
     event: AstrMessageEvent,
     logger_instance: Any | None = None,
-) -> list[str]:
+) -> list[windowProcessOutputJson]:
     chat_line_list: list[str] = []
     for message_item in sorted(messages, key=lambda item: item.time):
         message_time = int(message_item.time or 0)
@@ -254,9 +300,9 @@ async def process_msg(
             message_text = str(message_item.message)
         chat_line_list.append(f"[{time_text}] {message_item.user_id}: {message_text}")
 
-    step_size = 10
+    step_size = 20
     window_size = 50
-    llm_response_list: list[str] = []
+    window_process_llm_response_list: list[windowProcessOutputJson] = []
     provider_id = await context.get_current_chat_provider_id(umo=event.unified_msg_origin)
     prompt_template_path = Path(__file__).resolve().parent / "prompts" / "windowsProcessPrompt.md"
     prompt_template_text = prompt_template_path.read_text(encoding="utf-8")
@@ -266,7 +312,7 @@ async def process_msg(
     if window_size <= 0:
         window_size = 1
     if not chat_line_list:
-        return llm_response_list
+        return window_process_llm_response_list
 
     for window_start in range(0, len(chat_line_list), step_size):
         window_messages = chat_line_list[window_start : window_start + window_size]
@@ -280,8 +326,7 @@ async def process_msg(
             prompt=llm_prompt,
         )
         completion_text = getattr(llm_response, "completion_text", str(llm_response))
-        llm_response_list.append(completion_text)
-        if logger_instance:
-            logger_instance.info(completion_text)
+        parsed_items = _parse_window_process_items(completion_text)
+        window_process_llm_response_list.extend(parsed_items)
 
-    return llm_response_list
+    return window_process_llm_response_list

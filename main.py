@@ -3,6 +3,7 @@ import datetime
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+from .models.windowProcessOutputJson import windowProcessOutputJson
 from .util import get_msg_list, process_msg
 
 
@@ -67,7 +68,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
 
 
         # 处理消息
-        llm_response_list: list[str] = await process_msg(
+        window_process_llm_response_list: list[windowProcessOutputJson] = await process_msg(
             messages=messages,
             context=self.context,
             event=event,
@@ -81,8 +82,8 @@ class QQGroupMsgInfoGatheringPlugin(Star):
         )
 
         # 发送 LLM 处理结果
-        for response in llm_response_list:
-            await event.send(event.plain_result(response))
+        for response in window_process_llm_response_list:
+            await event.send(event.plain_result(response.to_json()))
         
     async def terminate(self):
         return None
