@@ -67,7 +67,7 @@ class QQGroupMsgInfoGatheringPlugin(Star):
 
 
         # 处理消息
-        await process_msg(
+        llm_response_list: list[str] = await process_msg(
             messages=messages,
             context=self.context,
             event=event,
@@ -80,5 +80,9 @@ class QQGroupMsgInfoGatheringPlugin(Star):
             f"✅ 已收集 {len(messages)} 条消息（去重后），时间范围：{earliest} ~ {latest}"
         )
 
+        # 发送 LLM 处理结果
+        for response in llm_response_list:
+            await event.send(event.plain_result(response))
+        
     async def terminate(self):
         return None

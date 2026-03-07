@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+from pathlib import Path
 from typing import Any
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
@@ -240,42 +241,40 @@ async def process_msg(
     event: AstrMessageEvent,
     logger_instance: Any | None = None,
 ) -> list[str]:
-    message_json_list: list[str] = []
+    chat_line_list: list[str] = []
     for message_item in sorted(messages, key=lambda item: item.time):
-        message_json_list.append(
-            json.dumps(
-                {
-                    "time": message_item.time,
-                    "user_id": message_item.user_id,
-                    "message": message_item.message,
-                },
-                ensure_ascii=False,
-                default=str,
-            )
-        )
-    
-    #TODO: 完善 prompt
-    prompt_text = ""
+        message_time = int(message_item.time or 0)
+        if message_time > 0:
+            time_text = datetime.datetime.fromtimestamp(message_time).strftime("%Y-%m-%d %H:%M")
+        else:
+            time_text = "未知时间"
+        if isinstance(message_item.message, (list, dict)):
+            message_text = json.dumps(message_item.message, ensure_ascii=False, default=str)
+        else:
+            message_text = str(message_item.message)
+        chat_line_list.append(f"[{time_text}] {message_item.user_id}: {message_text}")
+
     step_size = 10
     window_size = 50
     llm_response_list: list[str] = []
     provider_id = await context.get_current_chat_provider_id(umo=event.unified_msg_origin)
+    prompt_template_path = Path(__file__).resolve().parent / "prompts" / "windowsProcessPrompt.md"
+    prompt_template_text = prompt_template_path.read_text(encoding="utf-8")
 
     if step_size <= 0:
         step_size = 1
     if window_size <= 0:
         window_size = 1
-    if not message_json_list:
+    if not chat_line_list:
         return llm_response_list
 
-    # 滑动窗口：先处理前 window_size 条，再每轮向后滑动 step_size 条
-    # 例如窗口大小 50、步长 10：第 1 轮 1~50，第 2 轮 11~60，第 3 轮 21~70
-    for window_start in range(0, len(message_json_list), step_size):
-        window_messages = message_json_list[window_start : window_start + window_size]
+    for window_start in range(0, len(chat_line_list), step_size):
+        window_messages = chat_line_list[window_start : window_start + window_size]
         if not window_messages:
             break
 
-        llm_prompt = f"{prompt_text}\n\n消息列表：\n" + "\n".join(window_messages)
+        window_messages_text = "\n".join(window_messages)
+        llm_prompt = prompt_template_text.replace("{{messages}}", window_messages_text)
         llm_response = await context.llm_generate(
             chat_provider_id=provider_id,
             prompt=llm_prompt,
@@ -284,5 +283,5 @@ async def process_msg(
         llm_response_list.append(completion_text)
         if logger_instance:
             logger_instance.info(completion_text)
-    
-    #TODO: 对中间结果进一步处理
+
+    return llm_response_list
